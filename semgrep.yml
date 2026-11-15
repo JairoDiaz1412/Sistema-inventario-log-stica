@@ -1,0 +1,8 @@
+rules:
+  - id: python-ejecucion-dinamica
+    languages: [python]
+    message: Evitar la ejecución dinámica de código con eval o exec.
+    severity: ERROR
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
