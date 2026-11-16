@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt
@@ -27,8 +27,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: python -m pip install semgrep
       - run: semgrep scan --config semgrep.yml --error --metrics=off inventario.py
+
+  deploy-staging:
+    name: deploy-staging
+    needs: [test, security-scan]
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Despliegue de laboratorio en staging
+        run: |
+          mkdir -p /tmp/staging
+          cp inventario.py requirements.txt test_*.py /tmp/staging/
+          cd /tmp/staging
+          python -m pip install -r requirements.txt
+          python -m pytest -v
+          echo "Validacion de staging exitosa"
+          echo "Version: $GITHUB_SHA"
+
+  deploy-production:
+    name: deploy-production
+    needs: [test, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Despliegue de laboratorio en produccion
+        run: |
+          mkdir -p /tmp/production
+          cp inventario.py requirements.txt test_*.py /tmp/production/
+          cd /tmp/production
+          python -m pip install -r requirements.txt
+          python -m pytest -v
+          echo "Despliegue de laboratorio autorizado"
+          echo "Version: $GITHUB_SHA"
