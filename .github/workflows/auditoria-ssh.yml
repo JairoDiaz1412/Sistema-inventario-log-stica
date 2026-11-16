@@ -1,0 +1,172 @@
+name: Auditoria SSH - Logistica Global
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auditoria-ssh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Ejecutar laboratorio de seguridad SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LAB=$(mktemp -d)
+          EVID="$RUNNER_TEMP/evidencias-ssh"
+          mkdir -p "$EVID"
+
+          registrar() {
+            echo "$*" | tee -a "$EVID/resultados.txt"
+          }
+
+          limpiar() {
+            if [ -f "$LAB/sshd.log" ]; then
+              sudo cat "$LAB/sshd.log" > "$EVID/accesos-ssh.log"
+            fi
+            if [ -f "$LAB/sshd.pid" ]; then
+              sudo kill "$(sudo cat "$LAB/sshd.pid")" || true
+            fi
+            rm -rf "$LAB"
+          }
+
+          trap limpiar EXIT
+
+          registrar "AUDITORIA SSH - LOGISTICA GLOBAL S.A."
+          registrar "Hecho D - Laboratorio de control de accesos"
+          registrar "Fecha UTC: $(date -u)"
+
+          # 1. Instalar OpenSSH
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y openssh-server
+          fi
+          sudo mkdir -p /run/sshd
+
+          # 2. Crear cuentas de laboratorio
+          for usuario in admin_developer dev_uno dev_dos; do
+            sudo useradd -m -s /bin/bash "$usuario"
+            printf '%s:%s\n' "$usuario" "$(openssl rand -hex 32)" |
+              sudo chpasswd
+
+            ssh-keygen -q -t ed25519 -N "" \
+              -C "$usuario-laboratorio" -f "$LAB/$usuario"
+
+            sudo install -d -m 700 -o "$usuario" -g "$usuario" \
+              "/home/$usuario/.ssh"
+
+            sudo install -m 600 -o "$usuario" -g "$usuario" \
+              "$LAB/$usuario.pub" \
+              "/home/$usuario/.ssh/authorized_keys"
+          done
+
+          registrar "OK: Tres cuentas de laboratorio creadas"
+
+          # 3. Configurar servidor SSH local
+          ssh-keygen -q -t ed25519 -N "" -f "$LAB/host"
+
+          printf '[127.0.0.1]:2222 %s\n' \
+            "$(cat "$LAB/host.pub")" > "$LAB/known_hosts"
+
+          cat > "$LAB/sshd_config" <<EOF
+          Port 2222
+          ListenAddress 127.0.0.1
+          HostKey $LAB/host
+          PidFile $LAB/sshd.pid
+          AuthorizedKeysFile .ssh/authorized_keys
+          PubkeyAuthentication yes
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          AuthenticationMethods publickey
+          PermitRootLogin no
+          UsePAM yes
+          StrictModes yes
+          DisableForwarding yes
+          AllowUsers admin_developer dev_uno dev_dos
+          LogLevel VERBOSE
+          EOF
+
+          sudo /usr/sbin/sshd -t -f "$LAB/sshd_config"
+          sudo /usr/sbin/sshd -f "$LAB/sshd_config" \
+            -E "$LAB/sshd.log"
+
+          cp "$LAB/sshd_config" "$EVID/configuracion-ssh.txt"
+
+          conectar() {
+            ssh -F /dev/null -p 2222 \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=yes \
+              -o GlobalKnownHostsFile=/dev/null \
+              -o UserKnownHostsFile="$LAB/known_hosts" \
+              -i "$LAB/$1" "$2@127.0.0.1" "$3"
+          }
+
+          verificar_acceso() {
+            resultado=$(conectar "$1" "$2" "whoami")
+            test "$resultado" = "$2"
+            registrar "OK: Acceso autorizado como $resultado"
+          }
+
+          verificar_rechazo() {
+            if salida=$(conectar "$1" "$2" "whoami" 2>&1); then
+              registrar "ERROR: Acceso indebido permitido"
+              exit 1
+            else
+              codigo=$?
+              test "$codigo" -eq 255
+              [[ "$salida" == *"Permission denied"* ]]
+              registrar "OK: Acceso rechazado para $2 con clave $1"
+            fi
+          }
+
+          # 4. Simular situacion inicial
+          registrar "FASE 1: Situacion inicial"
+          verificar_acceso admin_developer admin_developer
+          verificar_acceso admin_developer admin_developer
+          registrar "HALLAZGO: Dos accesos con la misma identidad"
+
+          # 5. Aplicar medidas correctivas
+          registrar "FASE 2: Individualizacion de accesos"
+          verificar_acceso dev_uno dev_uno
+          verificar_acceso dev_dos dev_dos
+
+          # 6. Revocar cuenta compartida
+          sudo rm "/home/admin_developer/.ssh/authorized_keys"
+          sudo usermod --expiredate 1970-01-02 admin_developer
+
+          registrar "OK: Credencial compartida revocada"
+          verificar_rechazo admin_developer admin_developer
+
+          # 7. Comprobar aislamiento de identidades
+          verificar_rechazo dev_uno dev_dos
+          verificar_rechazo dev_dos dev_uno
+
+          # 8. Comprobar minimo privilegio
+          sudo install -d -m 755 /opt/logistica-produccion
+
+          for usuario in dev_uno dev_dos; do
+            conectar "$usuario" "$usuario" \
+              "test ! -w /opt/logistica-produccion"
+            registrar "OK: $usuario sin escritura en produccion"
+          done
+
+          # 9. Verificar accesos despues de la revocacion
+          verificar_acceso dev_uno dev_uno
+          verificar_acceso dev_dos dev_dos
+
+          registrar "RESULTADO FINAL: CONTROLES VERIFICADOS"
+
+      - name: Guardar evidencias de auditoria
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: Evidencias-Auditoria-SSH
+          path: ${{ runner.temp }}/evidencias-ssh/
+          retention-days: 30
